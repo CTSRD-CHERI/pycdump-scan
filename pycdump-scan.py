@@ -37,6 +37,7 @@ import struct
 import concurrent.futures as cf
 from elftools.elf.elffile import ELFFile
 from elftools.elf.segments import NoteSegment
+import os
 
 ################################
 # Parse command line arguments #
@@ -55,6 +56,7 @@ parser.add_argument('-n', '--nb-processes', type=auto_int, default=nb_cpu, metav
 gsizes = [4,8,16,32,64,128,256]
 parser.add_argument('-s', '--group-sizes', type=auto_int, default=gsizes, nargs='+', metavar='GROUPSZ',
                     help="specify group size(s) GROUPSZ(s) (in number of 64-bit (8-Byte) words) to be considered for statistics gathering (default: {})".format(gsizes))
+parser.add_argument("--dump-ptr-vector", help="Dump a file with extension .vecbin in the current working dir, which is just a boolean bit vector of whether this location contains a pointer or not.", action="store_true")
 
 args = parser.parse_args()
 
@@ -101,6 +103,7 @@ def scan(idx_fname_varanges):
     done = defaultdict(booldd)
     prev = intdd()
     sz = 0
+    ptrBitVector = []
     for b in s.iter_unpack(cdump.get_segment(idx).data()):
         # checking for zero mem
         iszero = b[0] == 0
@@ -109,6 +112,10 @@ def scan(idx_fname_varanges):
         for low, high in va_ranges:
             if b[0] >= low and b[0] < high:
                 isptr = True
+                ptrBitVector.append('1')
+                break
+        else:
+                ptrBitVector.append('0')
         # general chunks updates
         for gs in args.group_sizes:
             is_first = (sz % gs) == 0
@@ -135,7 +142,7 @@ def scan(idx_fname_varanges):
         # book keeping
         sz += 1
     # report
-    return (idx, sz, chunks)
+    return (idx, sz, chunks, ptrBitVector)
 
 #############################
 # FreeBSD VMMAP Note parser #
@@ -278,13 +285,15 @@ def scanfile(fname):
             res = pool.map(scan,zip(range(1,n+1),[fname]*n,[va_ranges]*n))
         # handle results
         summary = defaultdict(odd)
+        allPtrVectors = []
         for gs in args.group_sizes:
             summary['equal'][gs] = 0
             summary['zero'][gs] = 0
             summary['ptr'][gs] = 0
         total_size = 0
         for seg in res:
-            idx, sz, chunks = seg
+            idx, sz, chunks,eachPtrVector = seg
+            allPtrVectors = allPtrVectors + eachPtrVector
             for gs in args.group_sizes:
                 summary['equal'][gs] += chunks['equal'][gs]
                 summary['zero'][gs] += chunks['zero'][gs]
@@ -295,7 +304,7 @@ def scanfile(fname):
             summary['zero'][gs] = summary['zero'][gs] * gs * 100 / total_size
             summary['ptr'][gs] = summary['ptr'][gs] * gs * 100 / total_size
         cdump.stream.close()
-        return (fname,total_size,summary)
+        return (fname,total_size,summary,allPtrVectors)
 
 #################
 # main function #
@@ -308,6 +317,18 @@ def main():
         res = pool.map(scanfile,args.coredumps)
     for rpt in res:
         print("({}\ntotal size = {}\nequal\n{}\nzero\n{}\nptr\n{}".format(rpt[0],rpt[1],rpt[2]['equal'],rpt[2]['zero'],rpt[2]['ptr']))
+        if args.dump_ptr_vector:
+            with open(os.path.basename(rpt[0])+'.vecbin', 'wb') as eachOutput:
+                counter = 0
+                tempChar = 0
+                for eachChar in rpt[3]:
+                    if eachChar == "1":
+                        tempChar |= 1<<counter
+                    counter += 1
+                    if counter == 8:
+                        eachOutput.write(bytes([tempChar]))
+                        counter = 0
+                        tempChar = 0
     exit(0)
 
 if __name__ == "__main__":
