@@ -38,6 +38,7 @@ import concurrent.futures as cf
 from elftools.elf.elffile import ELFFile
 from elftools.elf.segments import NoteSegment
 import os
+from sortedcontainers import SortedDict
 
 ################################
 # Parse command line arguments #
@@ -109,13 +110,8 @@ def scan(idx_fname_varanges):
         iszero = b[0] == 0
         # checking for pointers
         isptr = False
-        for low, high in va_ranges:
-            if b[0] >= low and b[0] < high:
-                isptr = True
-                ptrBitVector.append('1')
-                break
-        else:
-                ptrBitVector.append('0')
+        isptr = va_range_set_contains(va_ranges, b[0])
+        ptrBitVector.append('1' if isptr else '0')
         # general chunks updates
         for gs in args.group_sizes:
             is_first = (sz % gs) == 0
@@ -259,9 +255,17 @@ def getVARanges(noteSeg):
             else:
                 #print("skipping n_type {}".format(n['n_type']))
                 pass
-        return merge_ranges(va_ranges)
+        va_ranges = merge_ranges(va_ranges)
+        return SortedDict(va_ranges) if va_ranges else None
     else:
         return None
+
+def va_range_set_contains(va_ranges, point):
+    # Note: this function raises KeyError if va_ranges is empty.  There should
+    # be no empty va_range_set's -- getVARanges() returns None instead
+    va_range_base = va_ranges.iloc[va_ranges.bisect_right(point) - 1]
+    va_range_end = va_ranges[va_range_base]
+    return va_range_base <= point < va_range_end
 
 
 #################################
@@ -293,7 +297,7 @@ def scanfile(fname):
         total_size = 0
         for seg in res:
             idx, sz, chunks,eachPtrVector = seg
-            allPtrVectors = allPtrVectors + eachPtrVector
+            allPtrVectors += eachPtrVector
             for gs in args.group_sizes:
                 summary['equal'][gs] += chunks['equal'][gs]
                 summary['zero'][gs] += chunks['zero'][gs]
@@ -313,8 +317,11 @@ def scanfile(fname):
 def main():
     workers = max(1,min(int(args.nb_processes/2+1),len(args.coredumps)))
     print("workers = {}".format(workers))
-    with cf.ProcessPoolExecutor(max_workers=workers) as pool:
-        res = pool.map(scanfile,args.coredumps)
+    if workers > 1:
+        with cf.ProcessPoolExecutor(max_workers=workers) as pool:
+            res = pool.map(scanfile,args.coredumps)
+    else:
+        res = [scanfile(cdump) for cdump in args.coredumps]
     for rpt in res:
         print("({}\ntotal size = {}\nequal\n{}\nzero\n{}\nptr\n{}".format(rpt[0],rpt[1],rpt[2]['equal'],rpt[2]['zero'],rpt[2]['ptr']))
         if args.dump_ptr_vector:
